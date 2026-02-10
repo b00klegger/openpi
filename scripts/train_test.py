@@ -1,6 +1,7 @@
 import dataclasses
 import os
 import pathlib
+from unittest import mock
 
 import pytest
 
@@ -28,3 +29,62 @@ def test_train(tmp_path: pathlib.Path, config_name: str):
     # test resuming
     config = dataclasses.replace(config, resume=True, num_train_steps=4)
     train.main(config)
+
+
+class TestAutoConfigureFsdp:
+    def _make_config(self, *, batch_size: int = 32, fsdp_devices: int = 1) -> _config.TrainConfig:
+        return dataclasses.replace(
+            _config._CONFIGS_DICT["debug"],  # noqa: SLF001
+            batch_size=batch_size,
+            fsdp_devices=fsdp_devices,
+        )
+
+    def test_single_device_unchanged(self):
+        config = self._make_config()
+        with mock.patch("jax.device_count", return_value=1):
+            result = train._auto_configure_fsdp(config)
+        assert result.fsdp_devices == 1
+
+    def test_fsdp_already_set_unchanged(self):
+        config = self._make_config(fsdp_devices=2)
+        with mock.patch("jax.device_count", return_value=4):
+            result = train._auto_configure_fsdp(config)
+        assert result.fsdp_devices == 2
+
+    def test_multi_device_low_memory_enables_fsdp(self):
+        config = self._make_config(batch_size=32)
+        with (
+            mock.patch("jax.device_count", return_value=4),
+            mock.patch.object(train, "_get_per_device_memory_gb", return_value=16.0),
+        ):
+            result = train._auto_configure_fsdp(config)
+        assert result.fsdp_devices == 4
+        assert result.batch_size == 32
+
+    def test_multi_device_high_memory_no_fsdp(self):
+        config = self._make_config()
+        with (
+            mock.patch("jax.device_count", return_value=4),
+            mock.patch.object(train, "_get_per_device_memory_gb", return_value=40.0),
+        ):
+            result = train._auto_configure_fsdp(config)
+        assert result.fsdp_devices == 1
+
+    def test_batch_size_adjusted_if_not_divisible(self):
+        config = self._make_config(batch_size=30)
+        with (
+            mock.patch("jax.device_count", return_value=4),
+            mock.patch.object(train, "_get_per_device_memory_gb", return_value=16.0),
+        ):
+            result = train._auto_configure_fsdp(config)
+        assert result.fsdp_devices == 4
+        assert result.batch_size == 28  # 30 // 4 * 4
+
+    def test_unknown_memory_warns(self):
+        config = self._make_config()
+        with (
+            mock.patch("jax.device_count", return_value=4),
+            mock.patch.object(train, "_get_per_device_memory_gb", return_value=None),
+        ):
+            result = train._auto_configure_fsdp(config)
+        assert result.fsdp_devices == 1
