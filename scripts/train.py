@@ -1,8 +1,13 @@
 import dataclasses
 import functools
 import logging
+import os
 import platform
 from typing import Any
+
+# Must be set before JAX is imported. Default 75% is too conservative for training
+# on memory-limited GPUs. Users can override by setting the env var before running.
+os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.9")
 
 import etils.epath as epath
 import flax.nnx as nnx
@@ -147,7 +152,10 @@ def train_step(
     def loss_fn(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
-        chunked_loss = model.compute_loss(rng, observation, actions, train=True)
+        compute_fn = model.compute_loss
+        if config.gradient_checkpointing:
+            compute_fn = jax.checkpoint(compute_fn)
+        chunked_loss = compute_fn(rng, observation, actions, train=True)
         return jnp.mean(chunked_loss)
 
     train_rng = jax.random.fold_in(rng, state.step)
@@ -235,7 +243,7 @@ def _auto_configure_fsdp(config: _config.TrainConfig) -> _config.TrainConfig:
             f"Auto-enabling FSDP: {mem_gb:.1f} GiB per device across {num_devices} devices. "
             f"Setting fsdp_devices={new_fsdp} to shard model parameters and reduce per-device memory."
         )
-        config = dataclasses.replace(config, fsdp_devices=new_fsdp)
+        config = dataclasses.replace(config, fsdp_devices=new_fsdp, gradient_checkpointing=True)
 
         # Scale batch size for per-device memory. During FSDP forward pass, peak memory
         # includes temporarily all-gathered full params (~4-5 GiB) plus activations.

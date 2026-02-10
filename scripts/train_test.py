@@ -60,6 +60,7 @@ class TestAutoConfigureFsdp:
             result = train._auto_configure_fsdp(config)
         assert result.fsdp_devices == 4
         assert result.batch_size == 8  # 2 samples/device * 4 devices
+        assert result.gradient_checkpointing is True
 
     def test_multi_device_20gb_scales_batch_moderately(self):
         config = self._make_config(batch_size=32)
@@ -70,6 +71,7 @@ class TestAutoConfigureFsdp:
             result = train._auto_configure_fsdp(config)
         assert result.fsdp_devices == 4
         assert result.batch_size == 16  # 4 samples/device * 4 devices
+        assert result.gradient_checkpointing is True
 
     def test_multi_device_high_memory_no_fsdp(self):
         config = self._make_config()
