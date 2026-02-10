@@ -38,7 +38,7 @@ Run training:
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run --group rlds scripts/train.py pi05_full_droid_finetune --exp-name=my_experiment --overwrite
 ```
 
-Training checkpoints will be saved to `checkpoints/pi05_full_droid_finetune/my_experiment/<step>/`. See the main README for more details about checkpoint structure and configuration options.
+Training checkpoints will be saved to `checkpoints/pi05_full_droid_finetune/my_experiment/<step>/`. See the [main README](../../README.md#2-defining-training-configs-and-running-training) for more details about checkpoint structure and configuration options.
 
 **Note**: The original pi0.5-DROID model was trained with joint velocity actions.
 Joint velocity actions are not compatible with simulated evaluation environments (much harder to simulate). 
@@ -104,7 +104,7 @@ To launch training:
 uv run scripts/train.py pi05_droid_finetune --exp-name=my_experiment --overwrite
 ```
 
-Training checkpoints will be saved to `checkpoints/pi05_droid_finetune/my_experiment/<step>/`. See the main README for more details about checkpoint structure and configuration options.
+Training checkpoints will be saved to `checkpoints/pi05_droid_finetune/my_experiment/<step>/`. See the [main README](../../README.md#2-defining-training-configs-and-running-training) for more details about checkpoint structure and configuration options.
 
 Once trained, you can follow the instructions in [`examples/droid/README.md`](examples/droid/README.md) to serve the policy and run it on the robot.
 
