@@ -247,11 +247,17 @@ def _auto_configure_fsdp(config: _config.TrainConfig) -> _config.TrainConfig:
 
         # Consumer/prosumer GPUs (which typically have < 24 GiB) often lack proper
         # peer-to-peer (P2P) GPU memory access support (no NVLink). NCCL's default
-        # P2P mode causes "illegal memory access" errors on these cards. Disable P2P
-        # to force NCCL to use shared memory/host staging instead.
-        if "NCCL_P2P_DISABLE" not in os.environ:
-            os.environ["NCCL_P2P_DISABLE"] = "1"
-            logging.info("Setting NCCL_P2P_DISABLE=1 for consumer GPU compatibility.")
+        # P2P mode causes "illegal memory access" errors on these cards.
+        # Additionally, containerized environments (Docker) often have a small /dev/shm
+        # (default 64MB), which is insufficient for NCCL shared memory transport.
+        # Disable both to force NCCL to use network sockets, which works everywhere.
+        for var, reason in [
+            ("NCCL_P2P_DISABLE", "consumer GPU P2P compatibility"),
+            ("NCCL_SHM_DISABLE", "limited /dev/shm in container environments"),
+        ]:
+            if var not in os.environ:
+                os.environ[var] = "1"
+                logging.info(f"Setting {var}=1 for {reason}.")
         config = dataclasses.replace(config, fsdp_devices=new_fsdp, gradient_checkpointing=True)
 
         # Scale batch size for per-device memory. During FSDP forward pass, peak memory
