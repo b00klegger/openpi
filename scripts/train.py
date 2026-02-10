@@ -152,10 +152,15 @@ def train_step(
     def loss_fn(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
-        compute_fn = model.compute_loss
         if config.gradient_checkpointing:
-            compute_fn = jax.checkpoint(compute_fn)
-        chunked_loss = compute_fn(rng, observation, actions, train=True)
+            # Capture train=True in closure so it's a Python constant, not a traced value.
+            # jax.checkpoint traces all args, and compute_loss uses `if train:` which
+            # requires a concrete (non-traced) boolean.
+            chunked_loss = jax.checkpoint(lambda r, o, a: model.compute_loss(r, o, a, train=True))(
+                rng, observation, actions
+            )
+        else:
+            chunked_loss = model.compute_loss(rng, observation, actions, train=True)
         return jnp.mean(chunked_loss)
 
     train_rng = jax.random.fold_in(rng, state.step)
