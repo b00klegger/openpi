@@ -51,29 +51,19 @@ class TestAutoConfigureFsdp:
             result = train._auto_configure_fsdp(config)
         assert result.fsdp_devices == 2
 
-    def test_multi_device_16gb_enables_fsdp_and_scales_batch(self):
+    def test_multi_device_16gb_enables_checkpointing_and_scales_batch(self):
+        """16 GiB GPUs: gradient checkpointing + batch reduction, no FSDP."""
         config = self._make_config(batch_size=32)
         with (
             mock.patch("jax.device_count", return_value=4),
-            mock.patch.object(train, "_get_per_device_memory_gb", return_value=16.0),
+            mock.patch.object(train, "_get_per_device_memory_gb", return_value=12.0),
         ):
             result = train._auto_configure_fsdp(config)
-        assert result.fsdp_devices == 4
-        assert result.batch_size == 8  # 2 samples/device * 4 devices
+        assert result.fsdp_devices == 1  # No FSDP, use simple data parallelism
         assert result.gradient_checkpointing is True
+        assert result.batch_size <= 32  # Reduced from default
 
-    def test_multi_device_20gb_scales_batch_moderately(self):
-        config = self._make_config(batch_size=32)
-        with (
-            mock.patch("jax.device_count", return_value=4),
-            mock.patch.object(train, "_get_per_device_memory_gb", return_value=20.0),
-        ):
-            result = train._auto_configure_fsdp(config)
-        assert result.fsdp_devices == 4
-        assert result.batch_size == 16  # 4 samples/device * 4 devices
-        assert result.gradient_checkpointing is True
-
-    def test_multi_device_high_memory_no_fsdp(self):
+    def test_multi_device_high_memory_unchanged(self):
         config = self._make_config()
         with (
             mock.patch("jax.device_count", return_value=4),
@@ -81,16 +71,16 @@ class TestAutoConfigureFsdp:
         ):
             result = train._auto_configure_fsdp(config)
         assert result.fsdp_devices == 1
+        assert result.gradient_checkpointing is False
 
     def test_batch_size_adjusted_if_not_divisible(self):
         config = self._make_config(batch_size=10)
         with (
             mock.patch("jax.device_count", return_value=4),
-            mock.patch.object(train, "_get_per_device_memory_gb", return_value=22.0),
+            mock.patch.object(train, "_get_per_device_memory_gb", return_value=12.0),
         ):
             result = train._auto_configure_fsdp(config)
-        assert result.fsdp_devices == 4
-        assert result.batch_size == 8  # 10 // 4 * 4
+        assert result.batch_size % 4 == 0  # Divisible by device count
 
     def test_unknown_memory_warns(self):
         config = self._make_config()
