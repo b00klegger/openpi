@@ -206,11 +206,14 @@ def _get_per_device_memory_gb() -> float | None:
 
 
 def _auto_configure_fsdp(config: _config.TrainConfig) -> _config.TrainConfig:
-    """Auto-enable FSDP when running on multiple devices with limited per-device memory.
+    """Auto-enable FSDP and scale batch size for multi-GPU setups with limited per-device memory.
 
     When fsdp_devices is at its default (1) and the system has multiple GPUs with
     less than 24 GiB each, FSDP is enabled across all devices to shard model parameters
-    and reduce per-device memory usage.
+    and the batch size is scaled down to fit per-device memory.
+
+    Even with FSDP, peak memory during the forward pass includes temporarily all-gathered
+    params plus activations, so batch size must also be reduced for small GPUs.
     """
     num_devices = jax.device_count()
     if num_devices <= 1 or config.fsdp_devices > 1:
@@ -220,7 +223,7 @@ def _auto_configure_fsdp(config: _config.TrainConfig) -> _config.TrainConfig:
     if mem_gb is None:
         logging.warning(
             f"Multiple devices detected ({num_devices}) but could not determine per-device memory. "
-            f"Consider setting --fsdp-devices={num_devices} if you encounter OOM errors."
+            f"Consider setting --fsdp-devices={num_devices} and reducing --batch-size if you encounter OOM errors."
         )
         return config
 
@@ -233,6 +236,24 @@ def _auto_configure_fsdp(config: _config.TrainConfig) -> _config.TrainConfig:
             f"Setting fsdp_devices={new_fsdp} to shard model parameters and reduce per-device memory."
         )
         config = dataclasses.replace(config, fsdp_devices=new_fsdp)
+
+        # Scale batch size for per-device memory. During FSDP forward pass, peak memory
+        # includes temporarily all-gathered full params (~4-5 GiB) plus activations.
+        # Target max 2 samples per device for GPUs <= 16 GiB, 4 for GPUs <= 20 GiB.
+        if mem_gb <= 16.0:
+            max_per_device = 2
+        elif mem_gb <= 20.0:
+            max_per_device = 4
+        else:
+            max_per_device = 8
+
+        max_batch = max_per_device * num_devices
+        if config.batch_size > max_batch:
+            logging.info(
+                f"Reducing batch_size from {config.batch_size} to {max_batch} "
+                f"({max_per_device} samples/device) to fit in {mem_gb:.1f} GiB per-device memory."
+            )
+            config = dataclasses.replace(config, batch_size=max_batch)
 
         # Ensure batch size is still divisible by the total mesh size.
         if config.batch_size % num_devices != 0:
