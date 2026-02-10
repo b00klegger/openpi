@@ -5,10 +5,6 @@ import os
 import platform
 from typing import Any
 
-# Must be set before JAX is imported. Default 75% is too conservative for training
-# on memory-limited GPUs. Users can override by setting the env var before running.
-os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.9")
-
 import etils.epath as epath
 import flax.nnx as nnx
 from flax.training import common_utils
