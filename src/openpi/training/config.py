@@ -591,6 +591,11 @@ class TrainConfig:
     # data parallel between 2 groups of devices.
     fsdp_devices: int = 1
 
+    # If true, use gradient checkpointing (jax.checkpoint) to recompute forward-pass activations
+    # during backward instead of storing them. Reduces peak memory at the cost of ~30% more compute.
+    # Automatically enabled when FSDP is auto-configured for memory-limited devices.
+    gradient_checkpointing: bool = False
+
     @property
     def assets_dirs(self) -> pathlib.Path:
         """Get the assets directory for this config."""
