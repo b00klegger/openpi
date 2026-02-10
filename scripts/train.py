@@ -215,14 +215,16 @@ def _get_per_device_memory_gb() -> float | None:
 
 
 def _auto_configure_fsdp(config: _config.TrainConfig) -> _config.TrainConfig:
-    """Auto-enable FSDP and scale batch size for multi-GPU setups with limited per-device memory.
+    """Auto-configure training for multi-GPU setups with limited per-device memory.
 
-    When fsdp_devices is at its default (1) and the system has multiple GPUs with
-    less than 24 GiB each, FSDP is enabled across all devices to shard model parameters
-    and the batch size is scaled down to fit per-device memory.
+    For GPUs with < 24 GiB, enables gradient checkpointing and reduces batch size so that
+    the model (with replicated params) and checkpointed activations fit per-device. This
+    uses simple data parallelism (replicated params, allreduce gradients) rather than FSDP,
+    which avoids complex all-gather/reduce-scatter patterns that are unreliable on consumer
+    GPUs and in container environments.
 
-    Even with FSDP, peak memory during the forward pass includes temporarily all-gathered
-    params plus activations, so batch size must also be reduced for small GPUs.
+    Also configures NCCL for consumer GPU / container compatibility (disables P2P and shared
+    memory transports that commonly fail in these environments).
     """
     num_devices = jax.device_count()
     if num_devices <= 1 or config.fsdp_devices > 1:
@@ -232,25 +234,19 @@ def _auto_configure_fsdp(config: _config.TrainConfig) -> _config.TrainConfig:
     if mem_gb is None:
         logging.warning(
             f"Multiple devices detected ({num_devices}) but could not determine per-device memory. "
-            f"Consider setting --fsdp-devices={num_devices} and reducing --batch-size if you encounter OOM errors."
+            f"Consider reducing --batch-size and adding --gradient-checkpointing if you encounter OOM errors."
         )
         return config
 
-    # 24 GiB threshold: models like pi0/pi05 need ~4-5 GiB for params alone in bf16,
-    # plus optimizer states and activations. Devices with < 24 GiB benefit from FSDP.
     if mem_gb < 24.0:
-        new_fsdp = num_devices
         logging.info(
-            f"Auto-enabling FSDP: {mem_gb:.1f} GiB per device across {num_devices} devices. "
-            f"Setting fsdp_devices={new_fsdp} to shard model parameters and reduce per-device memory."
+            f"Limited per-device memory detected: {mem_gb:.1f} GiB across {num_devices} devices. "
+            f"Enabling gradient checkpointing and reducing batch size."
         )
 
-        # Consumer/prosumer GPUs (which typically have < 24 GiB) often lack proper
-        # peer-to-peer (P2P) GPU memory access support (no NVLink). NCCL's default
-        # P2P mode causes "illegal memory access" errors on these cards.
-        # Additionally, containerized environments (Docker) often have a small /dev/shm
-        # (default 64MB), which is insufficient for NCCL shared memory transport.
-        # Disable both to force NCCL to use network sockets, which works everywhere.
+        # Consumer/prosumer GPUs (typically < 24 GiB, no NVLink) and containerized
+        # environments (small /dev/shm) need NCCL transport workarounds. Disable P2P
+        # and shared memory to force socket transport, which works everywhere.
         for var, reason in [
             ("NCCL_P2P_DISABLE", "consumer GPU P2P compatibility"),
             ("NCCL_SHM_DISABLE", "limited /dev/shm in container environments"),
@@ -258,19 +254,20 @@ def _auto_configure_fsdp(config: _config.TrainConfig) -> _config.TrainConfig:
             if var not in os.environ:
                 os.environ[var] = "1"
                 logging.info(f"Setting {var}=1 for {reason}.")
-        config = dataclasses.replace(config, fsdp_devices=new_fsdp, gradient_checkpointing=True)
 
-        # Scale batch size for per-device memory. During FSDP forward pass, peak memory
-        # includes temporarily all-gathered full params (~4-5 GiB) plus activations.
-        # Target max 2 samples per device for GPUs <= 16 GiB, 4 for GPUs <= 20 GiB.
-        if mem_gb <= 16.0:
-            max_per_device = 2
-        elif mem_gb <= 20.0:
-            max_per_device = 4
-        else:
-            max_per_device = 8
+        # Enable gradient checkpointing to dramatically reduce activation memory.
+        # Without it, a 2.3B model with 8 samples needs ~7.75 GiB for activations alone.
+        # With it, only the current layer's activations are stored (~tens of MB).
+        config = dataclasses.replace(config, gradient_checkpointing=True)
 
+        # With gradient checkpointing and replicated params (~4.6 GiB for pi0/pi05 in bf16),
+        # the remaining memory is available for per-sample activations.
+        # Be conservative: estimate ~5 GiB model overhead, rest for batch activations.
+        available_for_batch = mem_gb - 5.0
+        # ~0.5 GiB per sample is a conservative estimate with gradient checkpointing.
+        max_per_device = max(1, int(available_for_batch / 0.5))
         max_batch = max_per_device * num_devices
+
         if config.batch_size > max_batch:
             logging.info(
                 f"Reducing batch_size from {config.batch_size} to {max_batch} "
@@ -278,7 +275,7 @@ def _auto_configure_fsdp(config: _config.TrainConfig) -> _config.TrainConfig:
             )
             config = dataclasses.replace(config, batch_size=max_batch)
 
-        # Ensure batch size is still divisible by the total mesh size.
+        # Ensure batch size is divisible by device count.
         if config.batch_size % num_devices != 0:
             new_batch_size = (config.batch_size // num_devices) * num_devices
             if new_batch_size == 0:
@@ -290,7 +287,7 @@ def _auto_configure_fsdp(config: _config.TrainConfig) -> _config.TrainConfig:
             config = dataclasses.replace(config, batch_size=new_batch_size)
     else:
         logging.info(
-            f"FSDP not auto-enabled: {mem_gb:.1f} GiB per device is sufficient for parameter replication."
+            f"Per-device memory ({mem_gb:.1f} GiB) is sufficient; no auto-configuration needed."
         )
 
     return config
