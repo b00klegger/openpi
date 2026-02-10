@@ -191,9 +191,79 @@ def train_step(
     return new_state, info
 
 
+def _get_per_device_memory_gb() -> float | None:
+    """Returns per-device memory in GiB, or None if it cannot be determined."""
+    try:
+        devices = jax.devices()
+        if not devices:
+            return None
+        mem_stats = devices[0].memory_stats()
+        if mem_stats and "bytes_limit" in mem_stats:
+            return mem_stats["bytes_limit"] / (1024**3)
+    except Exception:
+        pass
+    return None
+
+
+def _auto_configure_fsdp(config: _config.TrainConfig) -> _config.TrainConfig:
+    """Auto-enable FSDP when running on multiple devices with limited per-device memory.
+
+    When fsdp_devices is at its default (1) and the system has multiple GPUs with
+    less than 24 GiB each, FSDP is enabled across all devices to shard model parameters
+    and reduce per-device memory usage.
+    """
+    num_devices = jax.device_count()
+    if num_devices <= 1 or config.fsdp_devices > 1:
+        return config
+
+    mem_gb = _get_per_device_memory_gb()
+    if mem_gb is None:
+        logging.warning(
+            f"Multiple devices detected ({num_devices}) but could not determine per-device memory. "
+            f"Consider setting --fsdp-devices={num_devices} if you encounter OOM errors."
+        )
+        return config
+
+    # 24 GiB threshold: models like pi0/pi05 need ~4-5 GiB for params alone in bf16,
+    # plus optimizer states and activations. Devices with < 24 GiB benefit from FSDP.
+    if mem_gb < 24.0:
+        new_fsdp = num_devices
+        logging.info(
+            f"Auto-enabling FSDP: {mem_gb:.1f} GiB per device across {num_devices} devices. "
+            f"Setting fsdp_devices={new_fsdp} to shard model parameters and reduce per-device memory."
+        )
+        config = dataclasses.replace(config, fsdp_devices=new_fsdp)
+
+        # Ensure batch size is still divisible by the total mesh size.
+        if config.batch_size % num_devices != 0:
+            new_batch_size = (config.batch_size // num_devices) * num_devices
+            if new_batch_size == 0:
+                new_batch_size = num_devices
+            logging.info(
+                f"Adjusting batch_size from {config.batch_size} to {new_batch_size} "
+                f"for compatibility with {num_devices} devices."
+            )
+            config = dataclasses.replace(config, batch_size=new_batch_size)
+    else:
+        logging.info(
+            f"FSDP not auto-enabled: {mem_gb:.1f} GiB per device is sufficient for parameter replication."
+        )
+
+    return config
+
+
 def main(config: _config.TrainConfig):
     init_logging()
     logging.info(f"Running on: {platform.node()}")
+
+    num_devices = jax.device_count()
+    mem_gb = _get_per_device_memory_gb()
+    logging.info(
+        f"Devices: {num_devices}, per-device memory: {f'{mem_gb:.1f} GiB' if mem_gb else 'unknown'}, "
+        f"fsdp_devices: {config.fsdp_devices}"
+    )
+
+    config = _auto_configure_fsdp(config)
 
     if config.batch_size % jax.device_count() != 0:
         raise ValueError(
