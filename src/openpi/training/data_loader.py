@@ -476,9 +476,15 @@ def _collate_fn(items):
 
 
 def _worker_init_fn(worker_id: int) -> None:
-    """Tell JAX inside the worker process not to preallocate the GPU memory."""
-    # NOTE: This is called after jax is imported inside the worker process. This
-    # means that this approach will not work for selecting the backend.
+    """Configure JAX to use CPU only in data loader worker processes.
+
+    When using 'spawn' multiprocessing context, each worker is a fresh process where JAX
+    has been imported but its backend has not yet been initialized (lazy init). Setting
+    JAX_PLATFORMS=cpu before any JAX operation ensures workers never initialize GPU/CUDA
+    backends, which would otherwise compete with the main process's NCCL collectives and
+    cause rendezvous deadlocks on multi-GPU hosts.
+    """
+    os.environ["JAX_PLATFORMS"] = "cpu"
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
     os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
 
