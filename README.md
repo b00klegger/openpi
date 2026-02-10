@@ -299,6 +299,8 @@ uv run torchrun \
     scripts/train_pytorch.py <config_name> --exp_name=<run_name> --save_interval <interval>
 ```
 
+PyTorch training saves checkpoints to the same directory structure as JAX: `checkpoints/<config_name>/<exp_name>/<step>/`. Each checkpoint includes the model state, optimizer state, and data processing assets.
+
 ### Precision Settings
 
 JAX and PyTorch implementations handle precision as follows:
